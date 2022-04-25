@@ -1,0 +1,112 @@
+package exercise_2;
+
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.graphx.*;
+import org.apache.spark.sql.SQLContext;
+import org.apache.spark.storage.StorageLevel;
+import scala.Tuple2;
+import scala.collection.Iterator;
+import scala.collection.JavaConverters;
+import scala.reflect.ClassTag$;
+import scala.runtime.AbstractFunction1;
+import scala.runtime.AbstractFunction2;
+import scala.runtime.AbstractFunction3;
+
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+
+public class Exercise_2 {
+
+    private static class VProg extends AbstractFunction3<Long,Integer,Integer,Integer> implements Serializable {
+        @Override
+        public Integer apply(Long vertexID, Integer vertexValue, Integer message) {
+            // Just keep the minimum of current value and pathsum (distance till adjecent source vertex + edge weight of previous adjecent vertex to current vertex)
+            return Math.min(message, vertexValue);
+        }
+    }
+
+    private static class sendMsg extends AbstractFunction1<EdgeTriplet<Integer,Integer>, Iterator<Tuple2<Object,Integer>>> implements Serializable {
+        @Override
+        public Iterator<Tuple2<Object, Integer>> apply(EdgeTriplet<Integer, Integer> triplet) {
+            Tuple2<Object,Integer> sourceVertex = triplet.toTuple()._1();
+            Tuple2<Object,Integer> dstVertex = triplet.toTuple()._2();
+            int edge_weight = triplet.attr();
+            // if source vertex is infinite(initial vertex values) or destination vertex is smaller then the new calculated path, do nothing
+            if (sourceVertex._2 ==Integer.MAX_VALUE ||  (dstVertex._2 <= sourceVertex._2 + edge_weight )){  // superstep 0
+                return JavaConverters.asScalaIteratorConverter(new ArrayList<Tuple2<Object,Integer>>().iterator()).asScala();
+            }
+            // else send message as pathsum (distance till source vertex + edge weight) to destination vertex(adjecent vertices)
+            else{  // superstep > 0
+                int pathsum = sourceVertex._2 + edge_weight;
+                return JavaConverters.asScalaIteratorConverter(Arrays.asList(new Tuple2<Object,Integer>(triplet.dstId(),pathsum)).iterator()).asScala();
+            }
+        }
+    }
+
+
+    private static class merge extends AbstractFunction2<Integer,Integer,Integer> implements Serializable {
+        @Override
+        // the logic is same in apply, whaterver messages are coming we just need to send the minimum one among those
+        public Integer apply(Integer o, Integer o2) {
+            return null;
+        }
+    }
+
+	public static void shortestPaths(JavaSparkContext ctx) {
+        Map<Long, String> labels = ImmutableMap.<Long, String>builder()
+                .put(1l, "A")
+                .put(2l, "B")
+                .put(3l, "C")
+                .put(4l, "D")
+                .put(5l, "E")
+                .put(6l, "F")
+                .build();
+
+        List<Tuple2<Object,Integer>> vertices = Lists.newArrayList(
+                new Tuple2<Object,Integer>(1l,0),
+                new Tuple2<Object,Integer>(2l,Integer.MAX_VALUE),
+                new Tuple2<Object,Integer>(3l,Integer.MAX_VALUE),
+                new Tuple2<Object,Integer>(4l,Integer.MAX_VALUE),
+                new Tuple2<Object,Integer>(5l,Integer.MAX_VALUE),
+                new Tuple2<Object,Integer>(6l,Integer.MAX_VALUE)
+        );
+        List<Edge<Integer>> edges = Lists.newArrayList(
+                new Edge<Integer>(1l,2l, 4), // A --> B (4)
+                new Edge<Integer>(1l,3l, 2), // A --> C (2)
+                new Edge<Integer>(2l,3l, 5), // B --> C (5)
+                new Edge<Integer>(2l,4l, 10), // B --> D (10)
+                new Edge<Integer>(3l,5l, 3), // C --> E (3)
+                new Edge<Integer>(5l, 4l, 4), // E --> D (4)
+                new Edge<Integer>(4l, 6l, 11) // D --> F (11)
+        );
+
+        JavaRDD<Tuple2<Object,Integer>> verticesRDD = ctx.parallelize(vertices);
+        JavaRDD<Edge<Integer>> edgesRDD = ctx.parallelize(edges);
+
+        Graph<Integer,Integer> G = Graph.apply(verticesRDD.rdd(),edgesRDD.rdd(),1, StorageLevel.MEMORY_ONLY(), StorageLevel.MEMORY_ONLY(),
+                scala.reflect.ClassTag$.MODULE$.apply(Integer.class),scala.reflect.ClassTag$.MODULE$.apply(Integer.class));
+
+        GraphOps ops = new GraphOps(G, scala.reflect.ClassTag$.MODULE$.apply(Integer.class),scala.reflect.ClassTag$.MODULE$.apply(Integer.class));
+
+        ops.pregel(Integer.MAX_VALUE,
+                Integer.MAX_VALUE,
+                EdgeDirection.Out(),
+                new VProg(),
+                new sendMsg(),
+                new merge(),
+                ClassTag$.MODULE$.apply(Integer.class))
+            .vertices()
+            .toJavaRDD().sortBy(f->((Tuple2<Object,Integer>) f)._1,true,1)
+            .foreach(v -> {
+                Tuple2<Object,Integer> vertex = (Tuple2<Object,Integer>)v;
+                System.out.println("Minimum cost to get from "+labels.get(1l)+" to "+labels.get(vertex._1)+" is "+vertex._2);
+            });
+	}
+}
